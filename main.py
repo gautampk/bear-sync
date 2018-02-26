@@ -25,112 +25,192 @@ os.stat_float_times(True)
 MAC_USERNAME = 'gautampk'
 ROOT = '/Users/gautampk/Dropbox/Bear/Sync'
 
+
 def main():
+    # Connect to Bear database.
     db = create_engine('sqlite:////Users/' + MAC_USERNAME + '/Library/' +
                        'Containers/net.shinyfrog.bear/Data/Documents/' +
                        'Application Data/database.sqlite')
 
-    # Delete files marked as trashed in the database.
-    trashed = pd.read_sql(
-        "SELECT a.ZTITLE || '_' || a.Z_PK || '.md' as FILE,\
-                c.ZTITLE as TAG_PATH, MAX(LENGTH(c.ZTITLE)) AS TAG_LEN\
-            FROM ( SELECT * FROM ZSFNOTE WHERE ZTRASHED = 1 and ZSKIPSYNC = 0 ) a\
-            LEFT JOIN Z_5TAGS b ON a.Z_PK = b.Z_5NOTES\
-            LEFT JOIN ZSFNOTETAG c ON b.Z_10TAGS = c.Z_PK\
-            GROUP BY FILE;",
-        db
-    )
-    trashed.loc[trashed['TAG_PATH'].isnull(), 'TAG_PATH'] = ''
-
-    for index, note in trashed.iterrows():
-        try:
-            os.remove(os.path.join(ROOT, note['TAG_PATH'], note['FILE']))
-        except FileNotFoundError:
-            pass
-
-    # Get all the untrashed notes from the database.
-    notes = pd.read_sql(
-        "SELECT a.Z_PK as ID, a.ZTITLE || '_' || a.Z_PK || '.md' as FILE,\
+    # Build list of files in the DB.
+    dbNotes = pd.read_sql(
+        "SELECT a.Z_PK as NID, a.ZTITLE || '.' || a.Z_PK || '.md' as FILE,\
                 a.ZTEXT as CONTENT, CAST(a.ZMODIFICATIONDATE as REAL) as DATE,\
-                c.ZTITLE as TAG_PATH, MAX(LENGTH(c.ZTITLE)) AS TAG_LEN\
-            FROM ( SELECT * FROM ZSFNOTE WHERE ZTRASHED = 0 and ZSKIPSYNC = 0 ) a\
+                c.ZTITLE as TAG_PATH, MAX(LENGTH(c.ZTITLE)) AS TAG_LEN,\
+                a.ZTRASHED as TRASHED\
+            FROM ( SELECT * FROM ZSFNOTE WHERE ZSKIPSYNC = 0 ) a\
             LEFT JOIN Z_5TAGS b ON a.Z_PK = b.Z_5NOTES\
             LEFT JOIN ZSFNOTETAG c ON b.Z_10TAGS = c.Z_PK\
             GROUP BY FILE;",
         db
-    )
-    notes.loc[notes['TAG_PATH'].isnull(), 'TAG_PATH'] = ''
+    ).set_index('NID')
+    dbNotes.loc[dbNotes['TAG_PATH'].isnull(), 'TAG_PATH'] = ''
+    dbNotes = dbNotes.to_dict(orient='index')
 
-    # Get current Bear database metadata
-    dbMeta = {}
-    for note in notes.to_dict(orient='records'):
-        dbMeta[note.pop('FILE')] = note
-
-    # Get current export folder metadata
-    fsMeta = {}
+    # Build list of files on the FS.
+    fsNotes = {}
     for path, _, files in os.walk(ROOT):
-        files = [f for f in files if f[0] != '.']
+        # Include only .md Markdown files.
+        files = [f for f in files if (
+            os.path.splitext(f)[1] == '.md' and
+            f[0] != '.'
+        )]
+
+        # Go through every note in the folder.
         for note in files:
-            with open(os.path.join(path, note), encoding='utf-8') as f:
-                content = f.read()
+            # Get the unique note ID.
+            nid = os.path.splitext(os.path.splitext(note)[0])[1][1:]
 
-            fsMeta[note] = {
-                'TAG_PATH': os.path.relpath(path, ROOT),
-                'DATE': os.path.getmtime(os.path.join(path, note)) +
-                            datetime(1970, 1, 1).timestamp() -
-                            datetime(2001, 1, 1).timestamp(),
-                'CONTENT': content
-            }
+            # Test the note ID to make sure it's an integer.
+            try:
+                int(nid)
+            except ValueError:
+                # If it's not an integer, skip it.
+                continue
+            else:
+                # Get the contents of the note.
+                with open(os.path.join(path, note), encoding='utf-8') as f:
+                    content = f.read()
 
-    # Create all files that are new in the database.
-    for key in dbMeta.keys() - fsMeta.keys():
-        # Create the tag path
+                # Add an entry.
+                fsNotes[int(nid)] = {
+                    'FILE': note,
+                    'CONTENT': content,
+                    'DATE': os.path.getmtime(os.path.join(path, note)) +
+                                datetime(1970, 1, 1).timestamp() -
+                                datetime(2001, 1, 1).timestamp(),
+                    'TAG_PATH': os.path.relpath(path, ROOT),
+                }
+
+    # Go through every file in the DB and compare it with the current FS
+    #   version.
+    for nid in dbNotes:
         try:
-            os.makedirs(os.path.join(ROOT, dbMeta[key]['TAG_PATH']))
-        except OSError as e:
-            print(e)
+            fsNotes[nid]
+        except KeyError:  # Note doesn't exist on the FS, so create it.
+            if dbNotes[nid]['TRASHED'] == 0:
+                # Create the tag path.
+                try:
+                    os.makedirs(os.path.join(ROOT, dbNotes[nid]['TAG_PATH']))
+                except OSError as e:
+                    pass
 
-        # Make the file
-        with open(
-            os.path.join(ROOT, dbMeta[key]['TAG_PATH'], key),
-            'w', encoding='utf-8'
-        ) as f:
-            f.write(dbMeta[key]['CONTENT'])
+                # Make the file.
+                with open(
+                    os.path.join(
+                        ROOT,
+                        dbNotes[nid]['TAG_PATH'],
+                        dbNotes[nid]['FILE']
+                    ),
+                    'w', encoding='utf-8'
+                ) as f:
+                    f.write(dbNotes[nid]['CONTENT'])
 
-        # Update the database with new time
-        date = os.path.getmtime(os.path.join(ROOT, dbMeta[key]['TAG_PATH'], key)) + \
-                    datetime(1970, 1, 1).timestamp() - datetime(2001, 1, 1).timestamp()
-        db.execute(
-            "UPDATE ZSFNOTE\
-                SET ZMODIFICATIONDATE = " + str(date) + "\
-                WHERE Z_PK = " + str(dbMeta[key]['ID']) + ";"
-        )
+                # Update the DB with new time.
+                date = os.path.getmtime(
+                    os.path.join(
+                        ROOT,
+                        dbNotes[nid]['TAG_PATH'],
+                        dbNotes[nid]['FILE']
+                    )
+                ) + datetime(1970, 1, 1).timestamp() - datetime(2001, 1, 1).timestamp()
+                db.execute(
+                    "UPDATE ZSFNOTE\
+                        SET ZMODIFICATIONDATE = " + str(date) + "\
+                        WHERE Z_PK = " + str(nid) + ";"
+                )
+        else:  # Note already exists, so compare details.
+            # First, make sure the note hasn't been trashed on the DB.
+            #   NB: trashing a note from the FS will not work, as it will be
+            #   re-added on the next sync. To trash a note you must use Bear.
+            if dbNotes[nid]['TRASHED'] != 0:
+                try:
+                    os.remove(
+                        os.path.join(
+                            ROOT,
+                            fsNotes[nid]['TAG_PATH'],
+                            fsNotes[nid]['FILE']
+                        )
+                    )
+                except FileNotFoundError:
+                    pass
+            else:
+                # Next, check if the DB filename or tag path has changed.
+                if (
+                    dbNotes[nid]['FILE'] != fsNotes[nid]['FILE'] or
+                    dbNotes[nid]['TAG_PATH'] != fsNotes[nid]['TAG_PATH']
+                ):
+                    # Update the FS filename and path to match the DB version.
+                    #   NB: to change the path of a note on the FS, update the
+                    #   tags inside the note, and wait for the sync with Bear
+                    #   to complete.
+                    # Create the tag path.
+                    try:
+                        os.makedirs(os.path.join(ROOT, dbNotes[nid]['TAG_PATH']))
+                    except OSError as e:
+                        pass
 
-    # Sync all existing files.
-    for key in dbMeta.keys() - (dbMeta.keys() - fsMeta.keys()):
-        if dbMeta[key]['DATE'] > fsMeta[key]['DATE']:
-            # Save to hard drive.
-            with open(
-                os.path.join(ROOT, dbMeta[key]['TAG_PATH'], key),
-                'w', encoding='utf-8'
-            ) as f:
-                f.write(dbMeta[key]['CONTENT'])
-        elif dbMeta[key]['DATE'] < fsMeta[key]['DATE']:
-            # Save to database.
-            db.execute(
-                "UPDATE ZSFNOTE\
-                    SET ZTEXT = \"" + fsMeta[key]['CONTENT'] + "\"\
-                    WHERE Z_PK = " + str(dbMeta[key]['ID']) + ";"
-            )
+                    os.rename(
+                        os.path.join(
+                            ROOT,
+                            fsNotes[nid]['TAG_PATH'],
+                            fsNotes[nid]['FILE']
+                        ),
+                        os.path.join(
+                            ROOT,
+                            dbNotes[nid]['TAG_PATH'],
+                            dbNotes[nid]['FILE']
+                        )
+                    )
 
-        # Update the database with new time
-        date = os.path.getmtime(os.path.join(ROOT, dbMeta[key]['TAG_PATH'], key)) + \
-                    datetime(1970, 1, 1).timestamp() - datetime(2001, 1, 1).timestamp()
-        db.execute(
-            "UPDATE ZSFNOTE\
-                SET ZMODIFICATIONDATE = " + str(date) + "\
-                WHERE Z_PK = " + str(dbMeta[key]['ID']) + ";"
-        )
+                    fsNotes[nid]['TAG_PATH'] = dbNotes[nid]['TAG_PATH']
+                    fsNotes[nid]['FILE'] = dbNotes[nid]['FILE']
+
+                # Now compare the dates and sync.
+                if dbNotes[nid]['DATE'] > fsNotes[nid]['DATE']:
+                    # Save DB to FS.
+                    with open(
+                        os.path.join(
+                            ROOT,
+                            fsNotes[nid]['TAG_PATH'],
+                            fsNotes[nid]['FILE']
+                        ),
+                        'w',
+                        encoding='utf-8'
+                    ) as f:
+                        f.write(dbNotes[nid]['CONTENT'])
+                elif dbNotes[nid]['DATE'] < fsNotes[nid]['DATE']:
+                    # Save FS to DB.
+                    db.execute(
+                        "UPDATE ZSFNOTE\
+                            SET ZTEXT = \"" + fsNotes[nid]['CONTENT'] + "\"\
+                            WHERE Z_PK = " + str(nid) + ";"
+                    )
+
+                # Update the DB with new time.
+                date = os.path.getmtime(
+                    os.path.join(
+                        ROOT,
+                        fsNotes[nid]['TAG_PATH'],
+                        fsNotes[nid]['FILE']
+                    )
+                ) + datetime(1970, 1, 1).timestamp() - datetime(2001, 1, 1).timestamp()
+                db.execute(
+                    "UPDATE ZSFNOTE\
+                        SET ZMODIFICATIONDATE = " + str(date) + "\
+                        WHERE Z_PK = " + str(nid) + ";"
+                )
+
+    # Go back through the FS and remove empty folders.
+    for path, folders, files in os.walk(ROOT):
+        # Include only .md Markdown files.
+        files = [f for f in files if (
+            os.path.splitext(f)[1] == '.md' and
+            f[0] != '.'
+        )]
+
+        if len(files) == 0 and len(folders) == 0:
+            os.rmdir(path)
 
 
 if __name__ == "__main__":
