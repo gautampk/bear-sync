@@ -22,8 +22,8 @@ from time import sleep
 
 os.stat_float_times(True)
 
-MAC_USERNAME = 'gautampk'
-ROOT = '/Users/gautampk/Dropbox/Bear/Sync'
+MAC_USERNAME = 'yourUsernameHere'
+ROOT = '~/Applications/bear-sync/sync/'
 
 
 def main():
