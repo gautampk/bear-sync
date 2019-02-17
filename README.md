@@ -12,7 +12,7 @@ This script needs Python to run. I've only tested it on Python 3, but it may wor
 1. Install Python requirements: `pip3 install -r requirements`.
 2. Update the username and sync location in `main.py` to be what you want.
 3. Update the path to `main.py` in the `.plist` file. By default, it is assumed that this is `~/Applications/bear-sync/main.py`.
-4. Copy the `.plist` to the correct location: `cp com.gautampk.bear-sync.plist ~/Libaray/LaunchAgents/`.
+4. Copy the `.plist` to the correct location: `cp com.gautampk.bear-sync.plist ~/Library/LaunchAgents/`.
 5. Either logout and login to start the service, or run `launchctl start com.gautampk.bear-sync`.
 
 ## Licence
